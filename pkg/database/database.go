@@ -1,8 +1,10 @@
-package bootstrap
+package database
 
 import (
 	"database/sql"
 	"log"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 var DB *sql.DB
@@ -25,7 +27,7 @@ func createTables() error {
 	sessions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id INTEGER NOT NULL,
-		session_token TEXT UNIQUE NOT NULL,
+		token TEXT UNIQUE NOT NULL,
 		expires_at DATETIME NOT NULL,
 		FOREIGN KEY (user_id)
 		REFERENCES users(id) ON DELETE CASCADE
@@ -46,10 +48,13 @@ func createTables() error {
 	books (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		title TEXT NOT NULL,
-		filepath TEXT UNIQUE NOT NULL,
+		user_id INTEGER NOT NULL,
+		filepath TEXT NOT NULL,
 		format TEXT NOT NULL,
 		size INTEGER NOT NULL,
-		created_at DATETIME NOT NULL
+		created_at DATETIME NOT NULL,
+		FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+		UNIQUE (user_id,filepath)
 	);
 	`
 
@@ -65,7 +70,7 @@ func createTables() error {
 }
 
 func InitDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_journal_mode=WAL")
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_journal_mode=WAL&_foreign_keys=ON")
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 防首屏闪白：CSS 加载前同步应用已存主题 -->
+<script>
+  try { document.documentElement.setAttribute('data-theme', localStorage.getItem('hl_theme') === 'dark' ? 'dark' : 'light'); } catch (e) {}
+</script>
+<title>书架 · homelab-reader</title>
+<link rel="stylesheet" href="/templates/app.css">
+</head>
+<body>
+
+<!-- ===== 灵动岛导航 ===== -->
+<nav class="nav">
+  <a class="brand" href="/dashboard"><span class="dot"></span>homelab<span>-reader</span></a>
+  <div class="nav-links">
+    <a class="nav-link" data-view="overview" href="/dashboard">概览</a>
+    <a class="nav-link" data-view="rss" href="/dashboard/rss">资讯</a>
+    <a class="nav-link active" data-view="shelf" href="/dashboard/books">书架</a>
+    <a class="nav-link" data-view="profile" href="/dashboard/user">我的</a>
+  </div>
+  <div class="nav-right">
+    <div id="navRight"></div>
+    <button class="theme-toggle" id="themeToggle" title="切换主题">☾</button>
+  </div>
+</nav>
+
+<main class="page">
+  <div class="page-head" style="display:flex;justify-content:space-between;align-items:flex-end;">
+    <div>
+      <div class="page-title">我的书架</div>
+      <div class="page-sub">点击一本书开始阅读。</div>
+    </div>
+    <button class="btn btn-primary" id="btnAddBook">+ 添加书籍</button>
+  </div>
+
+  <div class="grid grid-auto" id="shelfList"></div>
+  <div class="empty" id="shelfEmpty" style="display:none;"><div class="big">📚</div><p>书架空空如也</p></div>
+</main>
+
+<!-- ===== 登录/注册弹窗 ===== -->
+<div class="mask" id="authMask">
+  <div class="modal">
+    <button class="x" id="closeAuth">✕</button>
+    <h2 id="modalTitle">登录</h2>
+    <div class="tabs">
+      <button id="tabLogin" class="active">登录</button>
+      <button id="tabRegister">注册</button>
+    </div>
+    <form id="authForm" novalidate>
+      <div class="field"><label>用户名</label><input id="username" autocomplete="username" required></div>
+      <div class="field"><label>密码</label><input id="password" type="password" autocomplete="current-password" required></div>
+      <button class="btn btn-primary" type="submit" id="submitBtn">登 录</button>
+    </form>
+    <div class="msg" id="authMsg"></div>
+  </div>
+</div>
+
+<!-- ===== 添加书籍弹窗（文件上传） ===== -->
+<div class="mask" id="addMask">
+  <div class="modal">
+    <button class="x" id="closeAdd">✕</button>
+    <h2>添加书籍</h2>
+    <form id="addForm" novalidate>
+      <div class="field"><label>选择 TXT / EPUB 文件</label><input id="bkFile" type="file" accept=".txt,.epub" required></div>
+      <button class="btn btn-primary" type="submit">上传</button>
+    </form>
+    <div class="msg" id="addMsg"></div>
+  </div>
+</div>
+
+<!-- ===== 删除确认弹窗 ===== -->
+<div class="mask" id="delMask">
+  <div class="modal">
+    <button class="x" id="closeDel">✕</button>
+    <h2>删除书籍</h2>
+    <p id="delHint" style="color:var(--text-secondary);margin:6px 0 4px;">确定删除这本书吗？删除后无法恢复。</p>
+    <div class="msg" id="delMsg"></div>
+    <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:20px;">
+      <button class="btn btn-ghost" id="btnCancelDel">取消</button>
+      <button class="btn" id="btnConfirmDel" style="background:var(--danger,#b0453e);color:var(--bg-base,#fbf6f0);">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 全屏阅读器 ===== -->
+<div class="reader-mask" id="readerMask">
+  <div class="reader-head">
+    <button class="btn btn-ghost" id="btnBackReader">← 返回</button>
+    <span class="title" id="readerTitle"></span>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div class="font-size-ctrl" id="fontCtl">
+        <button id="fontMinus">A-</button>
+        <button id="fontPlus">A+</button>
+      </div>
+      <button class="theme-toggle" id="readerTheme" title="切换主题">☾</button>
+    </div>
+  </div>
+  <div class="reader-body" id="readerBody"><div class="reader-font" id="readerText">加载中…</div></div>
+  <div class="reader-foot">
+    <button class="btn btn-ghost" id="btnPrev">← 上一段</button>
+    <span class="pos" id="readerPos">0</span>
+    <span class="font-size-ctrl" id="fontSizeVal" style="color:var(--text-dim);font-size:12px;">字号 19</span>
+    <button class="btn btn-ghost" id="btnNext">下一段 →</button>
+  </div>
+</div>
+
+<script src="/templates/app.js"></script>
+<script>
+  const CHUNK = 4096;
+  let books = [];
+  let curBook = null, curOffset = 0, isEnd = false;
+
+  /* ---------- 书架加载 ---------- */
+  async function loadBooks() {
+    const wrap = document.getElementById('shelfList');
+    const empty = document.getElementById('shelfEmpty');
+    // 未登录直接进入"请先登录"，不再请求后端（也清空已渲染的书架）
+    if (!getStoredUsername()) {
+      books = [];
+      wrap.innerHTML = '';
+      empty.style.display = 'block';
+      empty.innerHTML = '<div class="big">🔒</div><p>请先登录查看书架</p>';
+      return;
+    }
+    try {
+      const b = await jfetch(API.books);
+      if (!b.ok) { wrap.innerHTML = ''; empty.style.display = 'block'; empty.innerHTML = '<div class="big">🔒</div><p>请先登录查看书架</p>'; return; }
+      books = Array.isArray(b.body) ? b.body : [];
+      if (books.length === 0) { wrap.innerHTML = ''; empty.style.display = 'block'; empty.innerHTML = '<div class="big">📚</div><p>书架空空如也</p>'; return; }
+      empty.style.display = 'none';
+      wrap.innerHTML = books.map(bk => `
+        <div class="book-card" data-id="${bk.id}">
+          <button class="book-del" data-del="${bk.id}" title="删除">✕</button>
+          <div class="book-cover" style="font-size:${bk.format === 'epub' ? 40 : 48}px">${bk.format === 'epub' ? '📔' : '📕'}</div>
+          <div class="book-title">${escapeHtml(bk.title)}</div>
+          <div class="book-meta"><span class="tag">${escapeHtml(bk.format)}</span><span>${fmtSize(bk.size)}</span></div>
+        </div>`).join('');
+      const cards = wrap.querySelectorAll('.book-card');
+      cards.forEach(c => {
+        c.addEventListener('click', () => openReader(c.dataset.id));
+        const del = c.querySelector('.book-del');
+        del.addEventListener('click', e => { e.stopPropagation(); askDelete(c.dataset.id); });
+      });
+    } catch (e) { empty.style.display = 'block'; empty.innerHTML = '<div class="big">⚠️</div><p>加载失败</p>'; }
+  }
+
+  /* ---------- 添加书籍 ---------- */
+  const addMask = document.getElementById('addMask');
+  document.getElementById('btnAddBook').addEventListener('click', () => {
+    if (!getStoredUsername()) { openAuthModal('login'); toast('请先登录'); return; }
+    addMask.classList.add('open');
+    document.getElementById('addMsg').textContent = '';
+  });
+  document.getElementById('closeAdd').addEventListener('click', () => addMask.classList.remove('open'));
+  document.getElementById('addForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fileInput = document.getElementById('bkFile');
+    const msg = document.getElementById('addMsg');
+    if (!fileInput.files || !fileInput.files[0]) { msg.className = 'msg err'; msg.textContent = '请选择要上传的文件'; return; }
+    const fd = new FormData();
+    fd.append('file', fileInput.files[0]);
+    msg.className = 'msg'; msg.textContent = '正在上传…';
+    // 上传用原生 fetch：jfetch 默认 credentials include，且不能手动设 Content-Type（浏览器给 multipart 生成 boundary）
+    try {
+      const res = await fetch(API.upload, { method: 'POST', body: fd, credentials: 'include' });
+      const ct = res.headers.get('content-type') || '';
+      const body = ct.includes('json') ? await res.json() : await res.text();
+      if (res.ok) {
+        msg.className = 'msg ok'; msg.textContent = '上传成功';
+        document.getElementById('addForm').reset();
+        setTimeout(() => { addMask.classList.remove('open'); loadBooks(); }, 700);
+      } else {
+        const errMsg = (body && typeof body === 'object' && body.error) || (typeof body === 'string' && body) || ('失败：' + res.status);
+        msg.className = 'msg err'; msg.textContent = errMsg;
+      }
+    } catch (err) {
+      msg.className = 'msg err'; msg.textContent = '上传失败，请检查网络';
+    }
+  });
+
+  /* ---------- 删除书籍（带确认弹窗） ---------- */
+  const delMask = document.getElementById('delMask');
+  let pendingDel = null; // 待删除的 book id
+
+  function openDel(bk) {
+    delMask.classList.add('open');
+    document.getElementById('delHint').textContent = `确定删除《${bk.title}》吗？删除后无法恢复。`;
+    document.getElementById('delMsg').textContent = '';
+    pendingDel = bk.id;
+  }
+  function closeDel() { delMask.classList.remove('open'); pendingDel = null; }
+  function askDelete(id) {
+    const bk = books.find(b => String(b.id) === String(id));
+    if (!bk) return;
+    if (!getStoredUsername()) { openAuthModal('login'); toast('请先登录'); return; }
+    openDel(bk);
+  }
+  document.getElementById('closeDel').addEventListener('click', closeDel);
+  document.getElementById('btnCancelDel').addEventListener('click', closeDel);
+  document.getElementById('btnConfirmDel').addEventListener('click', async () => {
+    if (pendingDel == null) return;
+    const msg = document.getElementById('delMsg');
+    msg.className = 'msg'; msg.textContent = '正在删除…';
+    try {
+      const r = await jfetch(`/api/books/${pendingDel}`, { method: 'DELETE' });
+      if (r.ok) {
+        closeDel();
+        toast('已删除');
+        loadBooks();
+      } else {
+        const body = r.body;
+        const errMsg = (body && typeof body === 'object' && body.error) || (typeof body === 'string' && body) || ('删除失败：' + r.status);
+        msg.className = 'msg err'; msg.textContent = errMsg;
+      }
+    } catch (e) { msg.className = 'msg err'; msg.textContent = '删除失败，请检查网络'; }
+  });
+
+  /* ---------- 阅读器 ---------- */
+  const readerMask = document.getElementById('readerMask');
+  function openReader(id) {
+    curBook = books.find(b => String(b.id) === String(id));
+    if (!curBook) return;
+    curOffset = 0; isEnd = false;
+    readerMask.classList.add('open');
+    document.getElementById('readerTitle').textContent = curBook.title;
+    readChunk();
+  }
+  function closeReader() { readerMask.classList.remove('open'); curBook = null; }
+  async function readChunk() {
+    const textEl = document.getElementById('readerText');
+    textEl.textContent = '加载中…';
+    try {
+      const r = await jfetch(`/api/books/${curBook.id}/content?offset=${curOffset}&length=${CHUNK}`);
+      if (!r.ok) { textEl.textContent = '读取失败，可能未登录或文件不存在'; return; }
+      textEl.textContent = r.body.content || '';
+      isEnd = !!r.body.is_end;
+      const curPage = Math.floor(curOffset / CHUNK) + 1;
+      document.getElementById('readerPos').textContent = isEnd ? '已到结尾' : `位置 ${curOffset} · 第 ${curPage} 段`;
+      document.getElementById('readerBody').scrollTop = 0;
+      document.getElementById('btnPrev').disabled = curOffset <= 0;
+      document.getElementById('btnNext').disabled = isEnd;
+    } catch (e) { textEl.textContent = '网络错误'; }
+  }
+
+  document.getElementById('btnBackReader').addEventListener('click', closeReader);
+  document.getElementById('btnPrev').addEventListener('click', () => { if (curBook && curOffset > 0) { curOffset = Math.max(0, curOffset - CHUNK); readChunk(); } });
+  document.getElementById('btnNext').addEventListener('click', () => { if (curBook && !isEnd) { curOffset += CHUNK; readChunk(); } });
+
+  /* 阅读器内独立主题切换 */
+  document.getElementById('readerTheme').addEventListener('click', toggleTheme);
+
+  /* 字体大小调节 */
+  let fontSize = 19;
+  function applyFont() {
+    document.getElementById('readerText').style.fontSize = fontSize + 'px';
+    document.getElementById('fontSizeVal').textContent = '字号 ' + fontSize;
+  }
+  document.getElementById('fontPlus').addEventListener('click', () => { fontSize = Math.min(28, fontSize + 2); applyFont(); });
+  document.getElementById('fontMinus').addEventListener('click', () => { fontSize = Math.max(14, fontSize - 2); applyFont(); });
+
+  document.addEventListener('DOMContentLoaded', () => { initAuth(() => loadBooks()); loadBooks(); });
+  // 登出后立即重置书架（loadBooks 内会因未登录态直接清空）
+  document.addEventListener('hl:logout', () => loadBooks());
+</script>
+</body>
+</html>

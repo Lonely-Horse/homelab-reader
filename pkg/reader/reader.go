@@ -2,6 +2,7 @@ package reader
 
 import (
 	"bytes"
+	"homelab-reader/pkg/models"
 	"io"
 	"os"
 )
@@ -38,4 +39,13 @@ func ReadTXTChunk(filePath string, offset int64, length int64) ([]byte, error) {
 	}
 
 	return validBuf, nil
+}
+
+func ValidBook(books []models.Book) bool {
+	for _, book := range books {
+		if book.Title == "" || book.FilePath == "" || book.Format == "" || book.Size == 0 {
+			return false
+		}
+	}
+	return true
 }

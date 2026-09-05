@@ -3,10 +3,12 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
-	"homelab-reader/bootstrap"
 	"homelab-reader/pkg/auth"
+	"homelab-reader/pkg/database"
 	"homelab-reader/pkg/models"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -28,18 +30,24 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Password == "" {
+	if req.Username == "" || req.Password == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("The password is empty"))
+		w.Write([]byte("The username or password is empty"))
 		return
 	}
 
 	//加密密码的同时，将用户名和哈希密码写入数据库
 	pwd_hash := auth.HashPassword(req.Password)
 	insert := "INSERT INTO users (username,password_hash) VALUES (?,?)"
-	_, err = bootstrap.DB.Exec(insert, req.Username, pwd_hash)
+	_, err = database.DB.Exec(insert, req.Username, pwd_hash)
 	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
+		//用户名已存在，返回 409 冲突
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte("The username already exists"))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("The data didn't insert"))
 		return
 	}
@@ -70,14 +78,14 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var storedID int64
 	var storedHash string
 	query1 := "SELECT id,password_hash FROM users WHERE username = ?"
-	err = bootstrap.DB.QueryRow(query1, req.Username).Scan(&storedID, &storedHash)
+	err = database.DB.QueryRow(query1, req.Username).Scan(&storedID, &storedHash)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte("Invalid username or password"))
 			return
 		}
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("The database didn't select now"))
 		return
 	}
@@ -90,7 +98,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	session_token, err := auth.GenerateToken()
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("The token didn't generate"))
 		return
 	}
@@ -100,9 +108,9 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	//在数据库中，保存随机值和过期时间
 	query2 := "INSERT INTO sessions (user_id,token,expires_at) VALUES (?,?,?)"
-	_, err = bootstrap.DB.Exec(query2, storedID, session_token, expiresAt)
+	_, err = database.DB.Exec(query2, storedID, session_token, expiresAt)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("The database insert failed"))
 		return
 	}
@@ -116,4 +124,33 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 	}
 	http.SetCookie(w, cookie)
+}
+
+func LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte("The method isn't Post"))
+		return
+	}
+
+	if cookie, err := r.Cookie("session_token"); err == nil && cookie.Value != "" {
+		log.Printf("logout: session=%s", cookie.Value)
+		query := "DELETE FROM sessions WHERE token = ?"
+		_, err = database.DB.Exec(query, cookie.Value)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("The logout failed"))
+			return
+		}
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
 }

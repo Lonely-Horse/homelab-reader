@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 防首屏闪白：CSS 加载前同步应用已存主题 -->
+<script>
+  try { document.documentElement.setAttribute('data-theme', localStorage.getItem('hl_theme') === 'dark' ? 'dark' : 'light'); } catch (e) {}
+</script>
+<title>我的 · homelab-reader</title>
+<link rel="stylesheet" href="/templates/app.css">
+</head>
+<body>
+
+<!-- ===== 灵动岛导航 ===== -->
+<nav class="nav">
+  <a class="brand" href="/dashboard"><span class="dot"></span>homelab<span>-reader</span></a>
+  <div class="nav-links">
+    <a class="nav-link" data-view="overview" href="/dashboard">概览</a>
+    <a class="nav-link" data-view="rss" href="/dashboard/rss">资讯</a>
+    <a class="nav-link" data-view="shelf" href="/dashboard/books">书架</a>
+    <a class="nav-link active" data-view="profile" href="/dashboard/user">我的</a>
+  </div>
+  <div class="nav-right">
+    <div id="navRight"></div>
+    <button class="theme-toggle" id="themeToggle" title="切换主题">☾</button>
+  </div>
+</nav>
+
+<main class="page">
+  <div class="page-head">
+    <div class="page-title">我的</div>
+    <div class="page-sub">账户信息与偏好</div>
+  </div>
+
+  <div class="panel" id="profilePanel">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+      <div class="avatar" id="profileAvatar" style="width:52px;height:52px;font-size:22px;">?</div>
+      <div>
+        <div style="font-weight:800;font-size:18px;" id="profileUser">未登录</div>
+        <div style="color:var(--text-dim);font-size:13px;" id="profileStatus">登录后同步你的书房数据</div>
+      </div>
+    </div>
+    <div class="book-meta" style="font-size:13px;color:var(--text-dim);">
+      阅读进度与偏好设置在本地浏览器保存，随主题切换实时生效。
+    </div>
+  </div>
+</main>
+
+<!-- ===== 登录/注册弹窗 ===== -->
+<div class="mask" id="authMask">
+  <div class="modal">
+    <button class="x" id="closeAuth">✕</button>
+    <h2 id="modalTitle">登录</h2>
+    <div class="tabs">
+      <button id="tabLogin" class="active">登录</button>
+      <button id="tabRegister">注册</button>
+    </div>
+    <form id="authForm" novalidate>
+      <div class="field"><label>用户名</label><input id="username" autocomplete="username" required></div>
+      <div class="field"><label>密码</label><input id="password" type="password" autocomplete="current-password" required></div>
+      <button class="btn btn-primary" type="submit" id="submitBtn">登 录</button>
+    </form>
+    <div class="msg" id="authMsg"></div>
+  </div>
+</div>
+
+<script src="/templates/app.js"></script>
+<script>
+  function refreshProfile() {
+    const name = getStoredUsername();
+    const user = document.getElementById('profileUser');
+    const status = document.getElementById('profileStatus');
+    const avatar = document.getElementById('profileAvatar');
+    if (name) {
+      user.textContent = name;
+      status.textContent = '已登录 · 数据自主掌控';
+      avatar.textContent = name.slice(0, 1).toUpperCase();
+    } else {
+      user.textContent = '未登录';
+      status.textContent = '登录后同步你的书房数据';
+      avatar.textContent = '?';
+    }
+  }
+  document.addEventListener('DOMContentLoaded', () => { initAuth(); refreshProfile(); });
+</script>
+</body>
+</html>

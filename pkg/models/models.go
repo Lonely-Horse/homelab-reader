@@ -18,7 +18,7 @@ type Session struct {
 	ID        int64     `json:"id"`
 	UserID    int64     `json:"user_id"`
 	Token     string    `json:"session_token"`
-	ExpiresAt time.Time `json:"expres_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type RSSFeed struct {
@@ -30,8 +30,9 @@ type RSSFeed struct {
 }
 
 type Book struct {
-	ID        int64     `josn:"id"`
+	ID        int64     `json:"id"`
 	Title     string    `json:"title"`
+	UserID    int64     `json:"user_id"`
 	FilePath  string    `json:"file_path"`
 	Format    string    `json:"format"`
 	Size      int64     `json:"size"`
@@ -65,4 +66,15 @@ type RegisterReq struct {
 type LoginReq struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type AddResult struct {
+	Title string `json:"title"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type ContentResp struct {
+	Content string `json:"content"`
+	IsEnd   bool   `json:"is_end"`
 }
