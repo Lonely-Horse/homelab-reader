@@ -57,6 +57,29 @@ type RssFeed struct {
 	Channel RSSChannel `xml:"channel"`
 }
 
+type RssFailure struct {
+	URL   string `json:"url"`
+	Error string `json:"error"`
+}
+
+type RssFeedOutput struct {
+	ID       int64     `json:"id"`
+	Title    string    `json:"title"`
+	URL      string    `json:"url"`
+	Category string    `json:"category"`
+	Items    []RSSItem `json:"items"`
+}
+
+type RssFetchResult struct {
+	Feeds    []RssFeedOutput `json:"feeds"`
+	Failures []RssFailure    `json:"failures"`
+}
+
+type FeedRec struct {
+	ID                   int64
+	Title, URL, Category string
+}
+
 // 鉴权时，使用的结构体
 type RegisterReq struct {
 	Username string `json:"username"`

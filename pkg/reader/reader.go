@@ -1,9 +1,7 @@
 package reader
 
 import (
-	"bytes"
 	"homelab-reader/pkg/models"
-	"io"
 	"os"
 )
 
@@ -14,31 +12,54 @@ func ReadTXTChunk(filePath string, offset int64, length int64) ([]byte, error) {
 	}
 	defer file.Close()
 
-	//规定文件的起点和切片大小
-	sectionReader := io.NewSectionReader(file, offset, length)
-
-	//开辟出一片length大小的空间
-	buf := make([]byte, length)
-
-	//将规定大小的切片内存注入到buf空间内
-	n, err := sectionReader.Read(buf)
-	if err != nil && err != io.EOF {
-		return nil, err
+	if length <= 0 {
+		length = 1
 	}
 
-	//将buf的空间中的0~n之内的所有字节都切割进入validBuf里面，当出现io.EOF的时候，直接返还在这之前的字节部分
-	validBuf := buf[:n]
-	if err == io.EOF {
-		return validBuf, nil
+	// 向前多读 3 字节，以便把 offset 处被切断的半个 UTF-8 字符补完整
+	readFrom := offset - 3
+	if readFrom < 0 {
+		readFrom = 0
+	}
+	buf := make([]byte, length+3)
+	n, _ := file.ReadAt(buf, readFrom)
+	data := buf[:n]
+	if len(data) == 0 {
+		return data, nil
 	}
 
-	//确定\n的位置，并将其定位到合适的下标数字，最后输出0~lastLF,也就是\n的下标位置之前的所有字节
-	lastLF := bytes.LastIndexByte(validBuf, '\n')
-	if lastLF != -1 {
-		return validBuf[:lastLF+1], nil
+	// 起点对齐：跳过前导的 UTF-8 续字节（0x80~0xBF），保证从完整字符开头返回
+	lead := 0
+	for lead < len(data) && (data[lead]&0xC0) == 0x80 {
+		lead++
 	}
+	data = data[lead:]
 
-	return validBuf, nil
+	// 终点对齐：找到最后一个完整字符的末尾下标
+	// 注意：完整字符的末尾也可能是续字节，需先定位 rune 起始再判断是否完整
+	s := len(data) - 1
+	for s >= 0 && (data[s]&0xC0) == 0x80 {
+		s--
+	}
+	if s < 0 {
+		return nil, nil // 全为续字节，无有效字符
+	}
+	b := data[s]
+	var need int
+	switch {
+	case b&0xF8 == 0xF0:
+		need = 4
+	case b&0xF0 == 0xE0:
+		need = 3
+	case b&0xE0 == 0xC0:
+		need = 2
+	default:
+		need = 1 // ASCII
+	}
+	if s+need > len(data) {
+		return data[:s], nil // 该字符不完整，去掉它的残留字节
+	}
+	return data[:s+need], nil
 }
 
 func ValidBook(books []models.Book) bool {

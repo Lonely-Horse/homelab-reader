@@ -30,7 +30,7 @@ func GetBooksHandler(w http.ResponseWriter, r *http.Request) {
 	var createdAt time.Time
 	var books []models.Book
 	userID := r.Context().Value(middleware.UserIDKey).(int64)
-	query := "SELECT id,title,filepath,format,size,created_at FROM books WHERE user_id = ? ORDER BY id ASC"
+	query := "SELECT * FROM books WHERE user_id = ? ORDER BY id ASC"
 	rows, err := database.DB.Query(query, userID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -28,17 +28,19 @@ func MuxRoutes(s *handlers.AppServer, tmplFS embed.FS) *http.ServeMux {
 	mux.HandleFunc("/dashboard", s.DashboardPage)
 	mux.HandleFunc("/dashboard/books", s.BooksPage)
 	mux.HandleFunc("/dashboard/rss", s.RssPage)
+	mux.HandleFunc("/dashboard/rss/item", s.RssItemPage)
 	mux.HandleFunc("/dashboard/user", s.UserPage)
 
 	mux.HandleFunc("/api/auth/login", handlers.LoginHandler)
 	mux.HandleFunc("/api/auth/register", handlers.RegisterHandler)
 	mux.HandleFunc("/api/auth/logout", handlers.LogoutHandler)
-	mux.HandleFunc("/api/rss", middleware.AuthMiddleware(handlers.GetRssHandler))
+	mux.HandleFunc("/api/rss", middleware.AuthMiddleware(handlers.RssHandler))
+	mux.HandleFunc("/api/rss/{id}", middleware.AuthMiddleware(handlers.DeleteRssHandler))
+	mux.HandleFunc("/api/rss/fetch", middleware.AuthMiddleware(handlers.FetchRssHandler))
+
 	mux.HandleFunc("/api/books", middleware.AuthMiddleware(handlers.BooksHandler))
 	mux.HandleFunc("/api/books/{id}", middleware.AuthMiddleware(handlers.DeleteBooksHandler))
 	mux.HandleFunc("/api/books/{id}/content", middleware.AuthMiddleware(handlers.GetBookContentHandler))
-
-	// 静态资源（共享 CSS / JS），供各模板页面引用
 	mux.Handle("/templates/", http.FileServer(http.FS(tmplFS)))
 
 	mux.HandleFunc("/", handlers.IndexRedirect)

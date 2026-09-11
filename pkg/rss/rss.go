@@ -2,13 +2,28 @@ package rss
 
 import (
 	"encoding/xml"
+	"fmt"
 	"homelab-reader/pkg/models"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
+func ValidRssUrl(url string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(url, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func FetchAndParseRSS(feedURL string) ([]models.RSSItem, error) {
+	if !ValidRssUrl(feedURL, "https://", "http://") {
+		return nil, fmt.Errorf("The URL is illegal")
+	}
+
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
@@ -25,6 +40,15 @@ func FetchAndParseRSS(feedURL string) ([]models.RSSItem, error) {
 	decoder := xml.NewDecoder(limitedReader)
 	err = decoder.Decode(&feed)
 	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, 1)
+	_, err = resp.Body.Read(buf)
+	if err == nil {
+		return nil, fmt.Errorf("feed too large")
+	}
+	if err != io.EOF {
 		return nil, err
 	}
 

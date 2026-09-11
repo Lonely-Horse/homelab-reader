@@ -14,7 +14,8 @@
 
 <!-- ===== 灵动岛导航 ===== -->
 <nav class="nav">
-  <a class="brand" href="/dashboard"><span class="dot"></span>homelab<span>-reader</span></a>
+  <a class="brand" href="/dashboard"><span class="dot"></span>Reader</a>
+  <button class="nav-toggle" id="navToggle" aria-label="菜单" aria-expanded="false">☰</button>
   <div class="nav-links">
     <a class="nav-link" data-view="overview" href="/dashboard">概览</a>
     <a class="nav-link active" data-view="rss" href="/dashboard/rss">资讯</a>
@@ -28,13 +29,21 @@
 </nav>
 
 <main class="page">
-  <div class="page-head">
-    <div class="page-title">RSS 资讯</div>
-    <div class="page-sub">订阅的资讯源 (rss_feeds)</div>
+  <div class="page-head" style="display:flex;justify-content:space-between;align-items:flex-end;">
+    <div>
+      <div class="page-title">RSS 资讯</div>
+      <div class="page-sub">订阅聚合的资讯源</div>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-ghost" id="btnRefreshRss">↻ 刷新</button>
+      <button class="btn btn-primary" id="btnAddRss">+ 添加订阅</button>
+    </div>
   </div>
 
+  <div id="rssFailures" style="display:none;margin-bottom:16px;padding:12px 16px;border:1px solid var(--danger);border-radius:12px;color:var(--danger);font-size:14px;background:var(--accent-soft);"></div>
+
   <div class="grid grid-auto" id="rssList"></div>
-  <div class="empty" id="rssEmpty" style="display:none;"><div class="big">📰</div><p></p></div>
+  <div class="empty" id="rssEmpty" style="display:none;"><div class="big">📰</div><p>还没有订阅源</p></div>
 </main>
 
 <!-- ===== 登录/注册弹窗 ===== -->
@@ -55,37 +64,263 @@
   </div>
 </div>
 
+<!-- ===== 添加订阅弹窗 ===== -->
+<div class="mask" id="addMask">
+  <div class="modal">
+    <button class="x" id="closeAdd">✕</button>
+    <h2>添加订阅源</h2>
+    <form id="addForm" novalidate>
+      <div class="field"><label>名称</label><input id="addTitle" placeholder="如：Hacker News" required></div>
+      <div class="field"><label>RSS 地址</label><input id="addUrl" type="url" placeholder="https://..." required></div>
+      <div class="field"><label>分类</label><input id="addCategory" placeholder="如：技术 / 新闻"></div>
+      <button class="btn btn-primary" type="submit">添加</button>
+    </form>
+    <div class="msg" id="addMsg"></div>
+  </div>
+</div>
+
+<!-- ===== 删除确认弹窗 ===== -->
+<div class="mask" id="delMask">
+  <div class="modal">
+    <button class="x" id="closeDel">✕</button>
+    <h2>删除订阅源</h2>
+    <p id="delHint" style="color:var(--text-secondary);margin:6px 0 4px;">确定删除这个订阅源吗？</p>
+    <div class="msg" id="delMsg"></div>
+    <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:20px;">
+      <button class="btn btn-ghost" id="btnCancelDel">取消</button>
+      <button class="btn" id="btnConfirmDel" style="background:var(--danger,#b0453e);color:var(--bg-base,#fbf6f0);">确认删除</button>
+    </div>
+  </div>
+</div>
+
 <script src="/templates/app.js"></script>
 <script>
-  async function loadRss() {
-    const wrap = document.getElementById('rssList');
-    const empty = document.getElementById('rssEmpty');
-    try {
-      const r = await jfetch(API.rss);
-      if (!r.ok) {
-        wrap.innerHTML = '';
-        empty.style.display = 'block';
-        empty.innerHTML = '<div class="big">🔒</div><p>请先登录查看资讯</p>';
-        return;
-      }
-      const feeds = Array.isArray(r.body) ? r.body : [];
-      if (feeds.length === 0) {
-        wrap.innerHTML = '';
-        empty.style.display = 'block';
-        empty.innerHTML = '<div class="big">📰</div><p>还没有订阅源</p>';
-        return;
-      }
-      empty.style.display = 'none';
-      wrap.innerHTML = feeds.map(f => `
-        <div class="feed-card">
-          <div class="tag feed-cat">${escapeHtml(f.category || '未分类')}</div>
-          <div class="feed-title">${escapeHtml(f.title)}</div>
-          <a class="feed-link" href="${escapeHtml(f.url)}" target="_blank" rel="noopener">${escapeHtml(f.url)}</a>
-        </div>`).join('');
-    } catch (e) { empty.style.display = 'block'; empty.innerHTML = '<div class="big">⚠️</div><p>加载失败</p>'; }
-  }
+/* ---------------- 状态 ---------------- */
+let curDeleteId = null;
+let itemsCache = {};   // feedId -> items[]（来自一次 fetch，含条目列表）
+let openedId = null;   // 当前展开的源 id
 
-  document.addEventListener('DOMContentLoaded', () => { initAuth(() => loadRss()); loadRss(); });
+/* ---------------- JSON 兜底解析 ---------------- */
+/* 若后端未显式设置 content-type: application/json，jfetch 会把 body 当成纯文本字符串返回。
+   这里统一兜底：哪怕是字符串，也尝试解析成对象，保证 r.body.failures / r.body.feeds 可用。 */
+function asObj(body) {
+  if (body && typeof body === 'object') return body;
+  if (typeof body === 'string') {
+    try { return JSON.parse(body); } catch (e) { return null; }
+  }
+  return null;
+}
+/* 把结果规范为数组：对象/字符串中的数组都提取，非数组返回 [] */
+function asArray(body) {
+  const obj = asObj(body);
+  if (Array.isArray(obj)) return obj;
+  return [];
+}
+
+/* ---------------- 列表渲染 ---------------- */
+// 一条 item 的展示（标题可点击进入中间页）
+function itemHtml(it) {
+  return `<a class="rss-item" href="#" data-url="${escapeHtml(it.link || '')}"
+        data-title="${escapeHtml(it.title || '')}" data-desc="${escapeHtml(it.description || '')}"
+        data-date="${escapeHtml(it.pub_date || '')}">
+      <span class="rss-item-title">${escapeHtml(it.title || '（无标题）')}</span>
+    </a>`;
+}
+// 渲染展开的 items 区域（就地嵌在源卡片下）
+function itemsBlock(feedId) {
+  const it = itemsCache[feedId];
+  if (!it || !it.length) {
+    return `<div class="rss-items-empty">该源暂无可展示的条目，请先「刷新」拉取内容。</div>`;
+  }
+  return `<div class="rss-items">${it.map(itemHtml).join('')}</div>`;
+}
+function renderFeeds(feeds) {
+  const wrap = document.getElementById('rssList');
+  const empty = document.getElementById('rssEmpty');
+  if (!feeds.length) {
+    wrap.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  wrap.innerHTML = feeds.map(f => `
+    <div class="feed-card" data-fid="${f.id}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+        <div class="tag feed-cat" style="word-break:break-all;">${escapeHtml(f.category || '未分类')}</div>
+        <button class="btn btn-icon" data-del="${escapeHtml(f.id)}" title="删除订阅源">🗑</button>
+      </div>
+      <div class="feed-title" style="margin-top:8px;cursor:pointer;" data-expand="${escapeHtml(f.id)}">${escapeHtml(f.title)}</div>
+      <a class="feed-link" href="${escapeHtml(f.url)}" target="_blank" rel="noopener" style="word-break:break-all;">${escapeHtml(f.url)}</a>
+      <div class="rss-items-wrap">${openedId === f.id ? itemsBlock(f.id) : ''}</div>
+    </div>`).join('');
+  wrap.querySelectorAll('[data-del]').forEach(btn =>
+    btn.addEventListener('click', e => { e.stopPropagation(); openDel(Number(btn.dataset.del)); }));
+  wrap.querySelectorAll('[data-expand]').forEach(el =>
+    el.addEventListener('click', () => toggleExpand(Number(el.dataset.expand))));
+  wrap.querySelectorAll('[data-url]').forEach(btn =>
+    btn.addEventListener('click', e => { e.preventDefault(); openItem(btn); }));
+}
+// 就地展开 / 收起某个源（直接全量重渲染，由 renderFeeds 依据 openedId 决定展示哪个 items）
+function toggleExpand(feedId) {
+  openedId = (openedId === feedId) ? null : feedId;
+  rememberOpened();
+  loadRss();
+}
+// 点击条目 → 写入 localStorage（跨标签页共享）→ 跳中间页
+function openItem(el) {
+  const nav = {
+    url: el.dataset.url,
+    title: el.dataset.title,
+    description: el.dataset.description,
+    pub_date: el.dataset.date,
+  };
+  try { localStorage.setItem('hl_rss_item', JSON.stringify(nav)); }
+  catch (e) { toast('无法打开该文章'); return; }
+  location.href = '/dashboard/rss/item';
+}
+// 记住当前展开的源 id，返回列表时自动恢复展开态
+function rememberOpened() {
+  try { sessionStorage.setItem('hl_rss_opened', String(openedId || '')); } catch (e) {}
+}
+function restoreOpened() {
+  try {
+    const v = sessionStorage.getItem('hl_rss_opened');
+    openedId = (v && v !== '') ? Number(v) : null;
+  } catch (e) { openedId = null; }
+  return openedId;
+}
+
+/* ---------------- 失败源提示 ---------------- */
+function renderFailures(failures) {
+  const el = document.getElementById('rssFailures');
+  if (!failures || !failures.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'block';
+  el.innerHTML = '<strong style="font-family:var(--font-sans);">部分订阅源更新失败：</strong><ul style="margin:6px 0 0 18px;">' +
+    failures.map(f => `<li>${escapeHtml(f.url)} — ${escapeHtml(f.error)}</li>`).join('') + '</ul>';
+}
+
+/* ---------------- 加载订阅源列表 ---------------- */
+async function loadRss() {
+  const empty = document.getElementById('rssEmpty');
+  try {
+    const r = await jfetch(API.rss);
+    if (!r.ok) {
+      renderFeeds([]);
+      empty.innerHTML = '<div class="big">🔒</div><p>请先登录查看资讯</p>';
+      empty.style.display = 'block';
+      return;
+    }
+    renderFeeds(asArray(r.body));
+  } catch (e) {
+    renderFeeds([]);
+    empty.innerHTML = '<div class="big">⚠️</div><p>加载失败</p>';
+    empty.style.display = 'block';
+  }
+}
+
+/* ---------------- 刷新（拉取内容） ---------------- */
+let refreshing = false;
+async function refreshRss() {
+  if (refreshing) return;
+  refreshing = true;
+  const btn = document.getElementById('btnRefreshRss');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await jfetch('/api/rss/fetch', { method: 'POST' });
+    if (!r.ok) { toast('刷新失败：' + r.status); return; }
+    const obj = asObj(r.body);
+    renderFailures(obj && obj.failures);
+    // 缓存本次拉回的 items（feedId -> items[]），供卡片就地展开使用
+    const feeds = (obj && obj.feeds) || [];
+    itemsCache = {};
+    feeds.forEach(f => { itemsCache[f.id] = f.items || []; });
+    // 刷新后重新加载订阅源列表
+    await loadRss();
+    toast('已刷新');
+  } catch (e) {
+    toast('刷新失败');
+  } finally {
+    refreshing = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* ---------------- 添加订阅源 ---------------- */
+function openAdd() {
+  document.getElementById('addForm').reset();
+  document.getElementById('addMsg').textContent = '';
+  document.getElementById('addMask').classList.add('open');
+}
+function setupAdd() {
+  const mask = document.getElementById('addMask');
+  const close = () => mask.classList.remove('open');
+  document.getElementById('closeAdd').addEventListener('click', close);
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  document.getElementById('addForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const title = document.getElementById('addTitle').value.trim();
+    const url = document.getElementById('addUrl').value.trim();
+    const category = document.getElementById('addCategory').value.trim();
+    const msg = document.getElementById('addMsg');
+    if (!title || !url) { msg.className = 'msg err'; msg.textContent = '名称和地址必填'; return; }
+    msg.className = 'msg'; msg.textContent = '正在添加…';
+    const r = await jfetch(API.rss, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, url, category }),
+    });
+    if (r.ok) {
+      msg.className = 'msg ok'; msg.textContent = '添加成功';
+      setTimeout(() => { close(); document.getElementById('addForm').reset(); loadRss(); toast('已添加订阅源'); }, 400);
+    } else {
+      msg.className = 'msg err';
+      msg.textContent = (typeof r.body === 'string' && r.body) || ('添加失败 ' + r.status);
+    }
+  });
+}
+
+/* ---------------- 删除订阅源 ---------------- */
+function openDel(id) {
+  curDeleteId = id;
+  document.getElementById('delMsg').textContent = '';
+  document.getElementById('delMask').classList.add('open');
+}
+async function confirmDel() {
+  if (curDeleteId == null) return;
+  try {
+    const r = await jfetch(API.rss + '/' + curDeleteId, { method: 'DELETE' });
+    if (r.ok || r.status === 204) {
+      document.getElementById('delMask').classList.remove('open');
+      loadRss();
+      toast('已删除订阅源');
+    } else {
+      document.getElementById('delMsg').className = 'msg err';
+      document.getElementById('delMsg').textContent = (typeof r.body === 'string' && r.body) || ('删除失败 ' + r.status);
+    }
+  } catch (e) {
+    document.getElementById('delMsg').className = 'msg err';
+    document.getElementById('delMsg').textContent = '删除失败';
+  }
+}
+function setupDel() {
+  const mask = document.getElementById('delMask');
+  const close = () => mask.classList.remove('open');
+  document.getElementById('closeDel').addEventListener('click', close);
+  document.getElementById('btnCancelDel').addEventListener('click', close);
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  document.getElementById('btnConfirmDel').addEventListener('click', confirmDel);
+}
+
+/* ---------------- 启动 ---------------- */
+document.addEventListener('DOMContentLoaded', () => {
+  initAuth(() => loadRss());
+  initNav();
+  document.getElementById('btnAddRss').addEventListener('click', openAdd);
+  document.getElementById('btnRefreshRss').addEventListener('click', refreshRss);
+  setupAdd();
+  setupDel();
+  restoreOpened();   // 返回列表时恢复上次展开的源
+  loadRss();
+});
 </script>
 </body>
 </html>

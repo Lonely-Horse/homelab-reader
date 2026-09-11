@@ -14,7 +14,8 @@
 
 <!-- ===== 灵动岛导航 ===== -->
 <nav class="nav">
-  <a class="brand" href="/dashboard"><span class="dot"></span>homelab<span>-reader</span></a>
+  <a class="brand" href="/dashboard"><span class="dot"></span>Reader</a>
+  <button class="nav-toggle" id="navToggle" aria-label="菜单" aria-expanded="false">☰</button>
   <div class="nav-links">
     <a class="nav-link" data-view="overview" href="/dashboard">概览</a>
     <a class="nav-link" data-view="rss" href="/dashboard/rss">资讯</a>
@@ -88,17 +89,24 @@
 <!-- ===== 全屏阅读器 ===== -->
 <div class="reader-mask" id="readerMask">
   <div class="reader-head">
-    <button class="btn btn-ghost" id="btnBackReader">← 返回</button>
+    <button class="btn btn-ghost reader-back" id="btnBackReader">←</button>
     <span class="title" id="readerTitle"></span>
-    <div style="display:flex;align-items:center;gap:12px;">
+    <button class="reader-burger" id="readerBurger" aria-label="功能菜单" aria-expanded="false">☰</button>
+    <div class="reader-menu" id="readerMenu">
+      <div class="reader-mode" id="readerMode">
+        <button data-mode="scroll">下滑</button>
+        <button data-mode="page">翻书</button>
+      </div>
       <div class="font-size-ctrl" id="fontCtl">
+        <label>字号</label>
         <button id="fontMinus">A-</button>
         <button id="fontPlus">A+</button>
       </div>
-      <button class="theme-toggle" id="readerTheme" title="切换主题">☾</button>
+      <button class="theme-toggle" id="readerTheme" title="切换主题">☾ 深浅</button>
     </div>
   </div>
   <div class="reader-body" id="readerBody"><div class="reader-font" id="readerText">加载中…</div></div>
+  <div class="reader-progress"><div class="bar" id="readerBar"></div></div>
   <div class="reader-foot">
     <button class="btn btn-ghost" id="btnPrev">← 上一段</button>
     <span class="pos" id="readerPos">0</span>
@@ -109,9 +117,9 @@
 
 <script src="/templates/app.js"></script>
 <script>
-  const CHUNK = 4096;
+  const CHUNK = 4096;                       // 下滑模式：一次读取的字节数
+  const PAGE_BYTES = 1200;                  // 翻书模式：约一屏能容纳的字节数（避免溢出裁剪）
   let books = [];
-  let curBook = null, curOffset = 0, isEnd = false;
 
   /* ---------- 书架加载 ---------- */
   async function loadBooks() {
@@ -220,43 +228,464 @@
 
   /* ---------- 阅读器 ---------- */
   const readerMask = document.getElementById('readerMask');
+  const readerBody = document.getElementById('readerBody');
+  const readerText = document.getElementById('readerText');
+  const readerBar = document.getElementById('readerBar');
+  let curBook = null, curOffset = 0, isEnd = false, bookTotalSize = 0;
+  let saveTimer = null;
+
+  // 阅读模式：page=横向翻书，scroll=连续下滑（默认下滑）
+  let mode = localStorage.getItem('hl_rmode') === 'page' ? 'page' : 'scroll';
+  let streamOffset = 0, loadingStream = false, streamInit = false;
+
+  // 字号持久化：从 localStorage 读取，不存在则默认 19
+  let fontSize = parseInt(localStorage.getItem('hl_fontsize')) || 19;
+
+  function currentOffset() { return mode === 'page' ? curOffset : streamOffset; }
+
+  function applyModeUI() {
+    document.querySelectorAll('#readerMode button').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === mode));
+    const isPage = mode === 'page';
+    document.getElementById('btnPrev').style.display = isPage ? '' : 'none';
+    document.getElementById('btnNext').style.display = isPage ? '' : 'none';
+    readerText.classList.toggle('reader-font', true);
+    readerText.classList.toggle('reader-scroll', !isPage);
+    // 阅读区始终可滚动，绝不裁剪内容（放大字号后内容超高时能滚到下方看完）
+    readerBody.style.overflow = 'auto';
+    document.getElementById('readerBody').scrollTop = 0;
+  }
+
+  document.querySelectorAll('#readerMode button').forEach(b => {
+    b.addEventListener('click', () => {
+      if (b.dataset.mode === mode) return;
+      mode = b.dataset.mode;
+      localStorage.setItem('hl_rmode', mode);
+      applyModeUI();
+      if (mode === 'page') readChunk(); else initStream();
+    });
+  });
+
+  /* ---- 阅读器顶栏自动隐藏：无操作一段时间后上滑消失 ---- */
+  let autoHideTimer = null;
+  function peekReaderHead() {
+    const head = document.querySelector('.reader-head');
+    const foot = document.querySelector('.reader-foot');
+    if (head) head.classList.remove('hidden-top');
+    if (foot) foot.classList.remove('hidden-bot');
+    if (autoHideTimer) clearTimeout(autoHideTimer);
+    autoHideTimer = setTimeout(() => {
+      const menu = document.getElementById('readerMenu');
+      if (menu && menu.classList.contains('open')) return; // 功能菜单展开时不自动隐藏
+      const h = document.querySelector('.reader-head');
+      const f = document.querySelector('.reader-foot');
+      if (h) h.classList.add('hidden-top');
+      if (f) f.classList.add('hidden-bot');
+    }, 3000);
+  }
+  /* 立即隐藏导航栏（并收起功能菜单） */
+  function hideReaderBars() {
+    if (autoHideTimer) { clearTimeout(autoHideTimer); autoHideTimer = null; }
+    const h = document.querySelector('.reader-head');
+    const f = document.querySelector('.reader-foot');
+    if (h) h.classList.add('hidden-top');
+    if (f) f.classList.add('hidden-bot');
+    const menu = document.getElementById('readerMenu');
+    if (menu) menu.classList.remove('open');
+    const b = document.getElementById('readerBurger');
+    if (b) b.setAttribute('aria-expanded', 'false');
+  }
+  /* 点顶部/底部 20% 唤出；点中间区域立即隐藏；下滑/中间点击不再弹出 */
+  function armReaderIdle() {
+    readerMask.addEventListener('pointerdown', (e) => {
+      // 点击导航/菜单自身：一律视为交互，保持显示、重置计时，绝不隐藏
+      if (e.target.closest('.reader-head') ||
+          e.target.closest('.reader-foot') ||
+          e.target.closest('.reader-menu')) {
+        peekReaderHead();
+        return;
+      }
+      const y = e.clientY, hgt = readerMask.clientHeight;
+      if (y < hgt * 0.2 || y > hgt * 0.8) peekReaderHead();
+      else hideReaderBars();
+    }, { passive: true });
+  }
+  function disarmReaderIdle() {
+    if (autoHideTimer) { clearTimeout(autoHideTimer); autoHideTimer = null; }
+    const head = document.querySelector('.reader-head');
+    const foot = document.querySelector('.reader-foot');
+    if (head) head.classList.remove('hidden-top');
+    if (foot) foot.classList.remove('hidden-bot');
+  }
+  /* 顶栏汉堡：展开/收起功能面板（仅绑定一次） */
+  let readerUiBound = false;
+  function bindReaderUi() {
+    if (readerUiBound) return;
+    readerUiBound = true;
+    const burger = document.getElementById('readerBurger');
+    const menu = document.getElementById('readerMenu');
+    burger.addEventListener('click', (e) => {
+      const open = menu.classList.toggle('open');
+      burger.setAttribute('aria-expanded', String(open));
+      peekReaderHead();
+    });
+    document.addEventListener('pointerdown', (e) => {
+      if (menu.classList.contains('open') && !e.target.closest('.reader-menu') && !e.target.closest('.reader-burger')) {
+        menu.classList.remove('open');
+        burger.setAttribute('aria-expanded', 'false');
+      }
+    });
+  }
+
   function openReader(id) {
     curBook = books.find(b => String(b.id) === String(id));
     if (!curBook) return;
-    curOffset = 0; isEnd = false;
+    curOffset = 0; streamOffset = 0; loadingStream = false; streamInit = false;
+    isEnd = false;
     readerMask.classList.add('open');
     document.getElementById('readerTitle').textContent = curBook.title;
-    readChunk();
-  }
-  function closeReader() { readerMask.classList.remove('open'); curBook = null; }
-  async function readChunk() {
-    const textEl = document.getElementById('readerText');
-    textEl.textContent = '加载中…';
-    try {
-      const r = await jfetch(`/api/books/${curBook.id}/content?offset=${curOffset}&length=${CHUNK}`);
-      if (!r.ok) { textEl.textContent = '读取失败，可能未登录或文件不存在'; return; }
-      textEl.textContent = r.body.content || '';
-      isEnd = !!r.body.is_end;
-      const curPage = Math.floor(curOffset / CHUNK) + 1;
-      document.getElementById('readerPos').textContent = isEnd ? '已到结尾' : `位置 ${curOffset} · 第 ${curPage} 段`;
-      document.getElementById('readerBody').scrollTop = 0;
-      document.getElementById('btnPrev').disabled = curOffset <= 0;
-      document.getElementById('btnNext').disabled = isEnd;
-    } catch (e) { textEl.textContent = '网络错误'; }
+    bookTotalSize = curBook.size || 0;
+    seekFullscreen(true);            // 进入阅读：全屏隐藏浏览器导航栏
+    applyFont();
+    applyModeUI();
+    bindReaderUi();
+    armReaderIdle();
+    peekReaderHead();
+    restoreProgress().then(() => {
+      if (mode === 'page') readChunk(); else initStream();
+    });
   }
 
+  async function restoreProgress() {
+    try {
+      const r = await jfetch(`/api/books/${curBook.id}/progress`);
+      if (r.ok && r.body && r.body.offset) {
+        const off = Math.max(0, r.body.offset);
+        curOffset = off; streamOffset = off;
+      }
+    } catch (e) { /* 后端未实现，忽略 */ }
+  }
+
+  function saveProgress() {
+    if (!curBook) return;
+    const off = currentOffset();
+    if (off <= 0) return;
+    fetch(`/api/books/${curBook.id}/progress`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ offset: off }),
+    }).catch(() => {});
+  }
+
+  function updateBar(pct) {
+    readerBar.style.width = (Math.min(100, Math.max(0, pct))) + '%';
+  }
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveProgress, 2000);
+  }
+
+  function closeReader() {
+    if (curBook) saveProgress();
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    disarmReaderIdle();
+    readerMask.classList.remove('open');
+    seekFullscreen(false);           // 退出阅读：恢复浏览器导航栏
+    curBook = null;
+  }
+
+  /* 全屏切换（隐藏浏览器原生导航，进入沉浸式阅读），带 Safari/前缀兜底 */
+  function seekFullscreen(enter) {
+    try {
+      if (enter) {
+        if (!document.fullscreenElement && !document.webkitFullscreenElement &&
+            (readerMask.requestFullscreen || readerMask.webkitRequestFullscreen)) {
+          (readerMask.requestFullscreen || readerMask.webkitRequestFullscreen).call(readerMask);
+        }
+      } else if (document.fullscreenElement || document.webkitFullscreenElement) {
+        const x = document.exitFullscreen ||
+                  document.webkitExitFullscreen ||
+                  document.mozCancelFullScreen;
+        if (x) x.call(document);
+      }
+    } catch (e) { /* 无事件授权时静默失败，不影响阅读 */ }
+  }
+
+  /* ---- 横向翻书模式 ---- */
+  const PAGE_LOAD = 4000;          // 单次请求块大小（字节）；滚动缓冲按需追加，块不再等同于“一屏”
+  const blen = (s) => new TextEncoder().encode(s).length;  // 真实字节数（content.length 是 UTF-16 字符数，推进必须用字节）
+  let buf = [];                    // 滚动缓冲：已拉取的所有行（跨块连续）
+  let lineBytes = [];              // 与 buf 对齐：每行在文件中的起始字节偏移（用于左翻精确定位）
+  let bufStartByte = 0;            // 缓冲首行(buf[0])在文件中的字节偏移
+  let bufEndByte = 0;              // 缓冲结束字节（下一块从这里继续追加）
+  let fileEndReached = false;      // 是否已缓冲到文件末尾
+  let nextReadLine = 0, nextReadCh = 0;   // 下一屏应从缓冲的哪一行/字符开始显示
+  let curStartByte = -1, curStartCh = 0;  // 当前正显示这屏的起点（文件字节/字符），供左翻返回
+  let lastScreenReached = false;   // 是否已显示到最后（整本）一屏
+  let pageStack = [];              // 历史栈：每翻到过的一屏起点 {byte, ch}，供左翻精确返回上一屏
+
+  let loadToken = 0;
+  // 追加一块：读“缓冲末尾字节”处的 PAGE_LOAD 字节，按行并入 buf/lineBytes，并推进 bufEndByte
+  async function addChunk() {
+    if (fileEndReached) return true;
+    const r = await jfetch(`/api/books/${curBook.id}/content?offset=${bufEndByte}&length=${PAGE_LOAD}`);
+    if (!r.ok) return false;
+    const c = r.body.content || '';
+    isEnd = !!r.body.is_end;
+    fileEndReached = !!r.body.is_end;
+    // 逐行记录“该行在文件中的起始字节”，用于左翻把字节定位到行
+    const parts = c.split('\n'); const n = parts.length;
+    let cur = bufEndByte;
+    for (let i = 0; i < n; i++) {
+      buf.push(parts[i].replace(/\r/g, ''));        // 展示行：剥掉 CRLF 的 \r，避免 pre-line 渲染成隐藏换行
+      lineBytes.push(cur);
+      cur += blen(parts[i]);                         // 字节数仍按原文（含 \r），保证偏移与文件一致
+      if (i < n - 1) cur += 1;                       // 每行后跟一个 '\n'(1字节)，末行除外
+    }
+    bufEndByte += blen(c);
+    return true;
+  }
+
+  // 从指定字节重建缓冲（开书/跨远回退用）
+  async function resetBuffer(startByte) {
+    buf = []; lineBytes = [];
+    bufStartByte = startByte; bufEndByte = startByte;
+    fileEndReached = false; lastScreenReached = false;
+    await addChunk();
+  }
+
+  /* 精确分页：优先按换行二分到“恰好一屏”，保证翻页无需下滑；
+     若某个段落单行本身超高（章节/版权大段），再降级为按字符细分该行；
+     全程仅约 log(n) 次测量，避免逐行重排导致白屏。 */
+  // 取消默认给每一页开头无脑加空格：
+  // 只有当该行是“真正的新自然段”（前面有空行、或是全书第0行），且不是跨页接续（ch === 0）时，才缩进两格；
+  // 跨页从段中接续（ch > 0）或普通连续行，绝对不加空格。
+  const isParagraphStart = (i, ch) => {
+    if (ch > 0) return false;                  // 从行内断点接续：绝不是段首，严禁空格
+    if (i === 0) return true;                  // 全书首行
+    return buf[i - 1].trim() === '';           // 只有上一行为空行（具有明显回车/空行分隔）才算新段落
+  };
+  const indentOf = (i, ch) => isParagraphStart(i, ch) ? '　　' : '';
+
+  // 在 [minCut+1, maxCut] 内找最后一个句末标点并随后断开，避免超长段落被“腰斩成两句话”。
+  // 找不到时退回 maxCut（足够满的行为保持不变）。
+  const sentenceCut = (text, maxCut, minCut) => {
+    if (maxCut <= minCut + 1) return maxCut;
+    for (let i = maxCut; i > minCut; i--) {
+      const ch = text[i - 1];
+      if (/[。！？…]/.test(ch)) return i;
+      if (i >= 2 && /[”』》）】]/.test(ch) && /[。！？…；]/.test(text[i - 2])) return i;
+    }
+    return maxCut;
+  };
+  const textFrom = (from, ch, toExcl) => {
+    let s = '';
+    for (let i = from; i < toExcl; i++) {
+      if (i >= buf.length) break;
+      const line = (i === from && ch > 0) ? buf[i].slice(ch) : buf[i];
+      const indent = indentOf(i, (i === from ? ch : 0));
+      s += indent + line + '\n';
+    }
+    return s;
+  };
+
+  /* 滚动缓冲分页：不再是“块=屏”，而是不断向后追加，直到当前屏能**溢出**或已到文件尾；
+     块尾不够一屏的文字会借用下一块补满 → 消除“几个字一屏+大段空白”。 */
+  async function renderPage() {
+    const el = readerText;
+    const cs = getComputedStyle(readerBody);
+    const avail = Math.max(60, readerBody.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0));
+    const from = nextReadLine, fch = nextReadCh;
+    const myTok = ++loadToken;
+
+    // 1) 确保缓冲足以溢出当前屏，或已到文件尾（不够就追加下一块，避免块尾瘦页）
+    while (!fileEndReached) {
+      el.textContent = textFrom(from, fch, buf.length);
+      if (el.scrollHeight > avail) break;
+      const ok = await addChunk();
+      if (myTok !== loadToken) return;      // 已被更新的翻页覆盖，丢弃本屏
+      if (!ok) break;
+    }
+
+    // 2) 已到文件尾且剩余全部装得下 → 整本最后一屏
+    const full = textFrom(from, fch, buf.length);
+    el.textContent = full;
+    if (el.scrollHeight <= avail) {
+      lastScreenReached = fileEndReached;
+      nextReadLine = buf.length; nextReadCh = 0;
+      el.textContent = full;
+      finalize(from, fch);
+      return;
+    }
+
+    // 3) 行级二分：找最大 best(含)，使 [from..best] 恰好一屏
+    let lo = from, hi = buf.length - 1, best = from;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      el.textContent = textFrom(from, fch, mid + 1);
+      if (el.scrollHeight <= avail) { best = mid; lo = mid; } else hi = mid - 1;
+    }
+    if (best > from) {
+      // 多行基础页 [from..best]。若底部仍有明显空余且下一行是“一行一段”的超长行，则把该行开头补进底部
+      // → 消除“章节题头只占几行+大片空白”的空页
+      const startText = textFrom(from, fch, best + 1);
+      el.textContent = startText;
+      const leftover = avail - el.scrollHeight;
+      const nl = best + 1;
+      let added = 0;
+      if (leftover >= 24 && nl < buf.length && buf[nl] !== '') {
+        const extra = buf[nl];
+        let cLo = 0, cHi = extra.length;
+        while (cLo < cHi) {
+          const mid = (cLo + cHi + 1) >> 1;
+          el.textContent = startText + extra.slice(0, mid);
+          if (el.scrollHeight <= avail) { added = mid; cLo = mid; } else cHi = mid - 1;
+        }
+      }
+      if (added > 0) {
+        el.textContent = startText + buf[nl].slice(0, added);
+        nextReadCh = added;
+        if (nextReadCh >= buf[nl].length) { nextReadCh = 0; nextReadLine = nl + 1; }
+        else nextReadLine = nl;
+      } else {
+        nextReadLine = nl; nextReadCh = 0;
+        el.textContent = startText;
+      }
+      finalize(from, fch);
+      return;
+    }
+
+    // 4) 单行超高 → 该行内按字符二分找“恰好一屏”的前缀；再回退到最近的句末标点断开，避免腰斩句子
+    const prefix = indentOf(from, fch);
+    const src = prefix + buf[from].slice(fch);
+    let cLo = 1, cHi = src.length;
+    while (cLo < cHi) {
+      const mid = (cLo + cHi + 1) >> 1;
+      el.textContent = src.slice(0, mid);
+      if (el.scrollHeight <= avail) cLo = mid; else cHi = mid - 1;
+    }
+    cLo = sentenceCut(src, cLo, prefix.length);       // minCut=prefix.length，最多回退处理，避免空页
+    const consumed = cLo - prefix.length;
+    el.textContent = src.slice(0, cLo);
+    nextReadCh = fch + consumed;
+    if (nextReadCh >= buf[from].length) { nextReadCh = 0; nextReadLine = from + 1; }
+    else nextReadLine = from;
+    finalize(from, fch);
+  }
+
+  function finalize(from, fch) {
+    curStartByte = buf.length ? (lineBytes[from] ?? 0) : 0;
+    curStartCh = fch;
+    const pctByte = lastScreenReached ? bufEndByte
+                  : (buf.length ? lineBytes[Math.min(nextReadLine, buf.length - 1)] : 0);
+    const pct = bookTotalSize > 0 ? Math.min(100, (pctByte / bookTotalSize) * 100) : 0;
+    updateBar(pct);
+    document.getElementById('readerPos').textContent =
+      lastScreenReached ? `已到结尾 · ${Math.round(pct)}%`
+                        : `第 ${Math.floor(pctByte / PAGE_BYTES) + 1} 页 · ${Math.round(pct)}%`;
+    readerBody.scrollTop = 0;
+    syncNavButtons();
+    scheduleSave();
+  }
+
+  // 翻页按钮可用性：左翻=历史栈为空则在首屏；右翻=已到最后（整本）一屏
+  function syncNavButtons() {
+    document.getElementById('btnPrev').disabled = pageStack.length === 0;
+    document.getElementById('btnNext').disabled = lastScreenReached;
+  }
+
+  function readChunk() {
+    nextReadLine = 0; nextReadCh = 0; curStartByte = -1; curStartCh = 0;
+    pageStack = []; lastScreenReached = false; isEnd = false;
+    const myTok = ++loadToken;
+    resetBuffer(0).then(() => { if (myTok === loadToken) renderPage(); });
+  }
+
+  /* ---- 连续下滑模式 ---- */
+  function initStream() {
+    streamInit = true;
+    streamOffset = streamOffset || 0;
+    loadingStream = false;
+    readerText.textContent = '';
+    loadStream();
+  }
+
+  async function loadStream() {
+    if (!curBook || loadingStream || isEnd) return;
+    loadingStream = true;
+    try {
+      const r = await jfetch(`/api/books/${curBook.id}/content?offset=${streamOffset}&length=${CHUNK}`);
+      if (!r.ok) { loadingStream = false; return; }
+      const add = r.body.content || '';
+      isEnd = !!r.body.is_end;
+      streamOffset += CHUNK; // 以字节对齐步进，保证 offset 准确
+      if (add) readerText.textContent += add;
+
+      const pct = bookTotalSize > 0 ? Math.min(100, (streamOffset / bookTotalSize) * 100) : 0;
+      updateBar(pct);
+      document.getElementById('readerPos').textContent = isEnd ? `已到结尾 · ${Math.round(pct)}%` : `已读 ${Math.round(pct)}%`;
+      scheduleSave();
+      loadingStream = false;
+    } catch (e) { loadingStream = false; }
+  }
+
+  // 下滑模式：滚动近底部时自动加载下一块
+  readerBody.addEventListener('scroll', () => {
+    if (mode !== 'scroll') return;
+    if (readerBody.scrollTop + readerBody.clientHeight >= readerBody.scrollHeight - 120) {
+      loadStream();
+    }
+  });
+
   document.getElementById('btnBackReader').addEventListener('click', closeReader);
-  document.getElementById('btnPrev').addEventListener('click', () => { if (curBook && curOffset > 0) { curOffset = Math.max(0, curOffset - CHUNK); readChunk(); } });
-  document.getElementById('btnNext').addEventListener('click', () => { if (curBook && !isEnd) { curOffset += CHUNK; readChunk(); } });
+
+  // 翻书模式：点击左右区域翻页（右侧下一页 / 左侧上一页）
+  readerBody.addEventListener('click', (e) => {
+    if (mode !== 'page' || !curBook) return;
+    if (e.target.closest('button, a')) return;
+    const rect = readerBody.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const mid = rect.width / 2;
+    if (x > mid + 24) nextPage();
+    else if (x < mid - 24) prevPage();
+  });
+
+  async function prevPage() {
+    if (!curBook) return;
+    if (pageStack.length === 0) return;             // 已在第一屏，禁止再往回
+    const p = pageStack.pop();                       // {byte, ch}
+    const myTok = ++loadToken;
+    if (p.byte < bufStartByte) {
+      await resetBuffer(p.byte);                     // 已越过缓冲首部：重建缓冲回到该字节（本实现不裁剪，通常不会触发）
+      if (myTok !== loadToken) return;
+    }
+    // 按“行起始字节”定位行索引（lineBytes 单调递增 → 二分）
+    if (p.byte < (buf.length ? lineBytes[0] : Infinity)) return;
+    let lo = 0, hi = buf.length, ans = 0;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (lineBytes[mid] <= p.byte) { ans = mid; lo = mid + 1; } else hi = mid; }
+    nextReadLine = ans; nextReadCh = p.ch;
+    await renderPage();
+  }
+  async function nextPage() {
+    if (!curBook) return;
+    if (lastScreenReached) return;                   // 已是最后一屏
+    pageStack.push({ byte: curStartByte, ch: curStartCh });  // 记录当前屏起点，供左翻返回
+    await renderPage();                              // nextReadLine/nextReadCh 已指向下一屏起点
+  }
+
+  document.getElementById('btnPrev').addEventListener('click', prevPage);
+  document.getElementById('btnNext').addEventListener('click', nextPage);
 
   /* 阅读器内独立主题切换 */
   document.getElementById('readerTheme').addEventListener('click', toggleTheme);
 
-  /* 字体大小调节 */
-  let fontSize = 19;
+  /* 字号调节 + 持久化 */
   function applyFont() {
-    document.getElementById('readerText').style.fontSize = fontSize + 'px';
+    readerText.style.fontSize = fontSize + 'px';
     document.getElementById('fontSizeVal').textContent = '字号 ' + fontSize;
+    localStorage.setItem('hl_fontsize', String(fontSize));
   }
   document.getElementById('fontPlus').addEventListener('click', () => { fontSize = Math.min(28, fontSize + 2); applyFont(); });
   document.getElementById('fontMinus').addEventListener('click', () => { fontSize = Math.max(14, fontSize - 2); applyFont(); });

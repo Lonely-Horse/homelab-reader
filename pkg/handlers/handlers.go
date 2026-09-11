@@ -26,6 +26,16 @@ func (s *AppServer) BooksPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *AppServer) RssItemPage(w http.ResponseWriter, r *http.Request) {
+	err := s.Tmpl.ExecuteTemplate(w, "rss_item.html", nil)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("Failed execute the config")
+		w.Write([]byte("Failed executetemplate html"))
+		return
+	}
+}
+
 func (s *AppServer) RssPage(w http.ResponseWriter, r *http.Request) {
 	err := s.Tmpl.ExecuteTemplate(w, "rss.html", nil)
 	if err != nil {

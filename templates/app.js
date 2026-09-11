@@ -167,6 +167,49 @@ function initNav() {
   if (tt) tt.addEventListener('click', toggleTheme);
 }
 
+/* ---------------- 导航栏随滚动隐藏/显示 ---------------- */
+(() => {
+  let lastY = 0, ticking = false;
+  function onScroll() {
+    const nav = document.querySelector('.nav');
+    if (!nav) return;
+    const y = window.scrollY;
+    const diff = y - lastY;
+    lastY = y;
+    // 回到页面顶部恢复显示，中途细碎抖动忽略
+    if (y < 40) { nav.classList.remove('nav-hidden'); return; }
+    if (Math.abs(diff) < 6) return;
+    nav.classList.toggle('nav-hidden', diff > 0);
+  }
+  window.addEventListener('scroll', () => {
+    if (!ticking) {
+      window.requestAnimationFrame(() => { onScroll(); ticking = false; });
+      ticking = true;
+    }
+  }, { passive: true });
+})();
+
+/* ---------------- 移动端汉堡菜单 ---------------- */
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.nav-toggle');
+  if (btn) {
+    const links = btn.nextElementSibling;
+    if (links && links.classList.contains('nav-links')) {
+      links.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(links.classList.contains('open')));
+    }
+    return;
+  }
+  // 点击展开面板之外的区域时收起菜单
+  document.querySelectorAll('.nav-links.open').forEach((el) => {
+    if (!e.target.closest('.nav-links')) {
+      el.classList.remove('open');
+      const t = el.previousElementSibling;
+      if (t && t.classList.contains('nav-toggle')) t.setAttribute('aria-expanded', 'false');
+    }
+  });
+});
+
 /* ---------------- 启动 ---------------- */
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
